@@ -1,89 +1,93 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
-# Configuración visual
 st.set_page_config(page_title="Marketplace Error Master", layout="wide")
 
-st.title("🚀 Optimizador de Errores Marketplace")
-st.markdown("""
-Esta herramienta agrupa tus errores y genera un Excel con una pestaña 
-dedicada a cada tipo de error para facilitar la corrección masiva.
-""")
+st.title("📊 Analizador Multierror de Marketplace")
+st.markdown("Carga tu CSV. Los errores separados por `|` se analizarán de forma individual.")
 
-# 1. Carga de archivo con detección de separador
-uploaded_file = st.file_uploader("Sube tu CSV de errores", type="csv")
+uploaded_file = st.file_uploader("Sube tu CSV", type="csv")
 
 if uploaded_file is not None:
-    # Leemos el archivo usando el separador detectado en tus ejemplos
+    # 1. Lectura inicial
     df = pd.read_csv(uploaded_file, sep=';')
     
-    # Limpieza básica: asegurar que las columnas existen
     if 'errors' in df.columns and 'shop_sku' in df.columns:
         
-        # Filtros en la barra lateral
-        st.sidebar.header("🔍 Panel de Filtros")
+        # --- PROCESAMIENTO DE ERRORES MÚLTIPLES ---
+        # Convertimos la columna de errores en una lista separando por '|'
+        df['errors_list'] = df['errors'].fillna('Sin Error').astype(str).str.split('|')
         
-        # Buscador por SKU
-        sku_to_find = st.sidebar.text_input("Buscar un SKU concreto")
+        # 'Explotamos' la lista: una fila por cada error individual
+        df_exploded = df.explode('errors_list')
         
-        # Selector de errores múltiples
-        all_errors = df['errors'].dropna().unique().tolist()
+        # Limpieza de espacios en blanco que puedan quedar tras el split
+        df_exploded['errors_list'] = df_exploded['errors_list'].str.strip()
+        
+        # --- PANEL DE FILTROS ---
+        st.sidebar.header("🔍 Filtros")
+        sku_search = st.sidebar.text_input("Buscar SKU")
+        
+        all_unique_errors = sorted(df_exploded['errors_list'].unique().tolist())
         selected_errors = st.sidebar.multiselect(
-            "Selecciona errores para el informe:", 
-            options=all_errors,
-            default=all_errors[:3] if len(all_errors) > 3 else all_errors
+            "Selecciona errores para analizar:", 
+            options=all_unique_errors
         )
 
-        # Aplicar lógica de filtrado
-        df_filtered = df.copy()
-        if sku_to_find:
-            df_filtered = df_filtered[df_filtered['shop_sku'].astype(str).str.contains(sku_to_find)]
+        # Aplicar filtros
+        df_to_show = df_exploded.copy()
+        if sku_search:
+            df_to_show = df_to_show[df_to_show['shop_sku'].astype(str).str.contains(sku_search)]
         if selected_errors:
-            df_filtered = df_filtered[df_filtered['errors'].isin(selected_errors)]
+            df_to_show = df_to_show[df_to_show['errors_list'].isin(selected_errors)]
 
-        # --- SECCIÓN DE ANÁLISIS ---
+        # --- VISUALIZACIÓN ---
         col1, col2 = st.columns([1, 1])
         
         with col1:
-            st.subheader("📋 Resumen de Incidencias")
-            # Agrupación por error y conteo
-            summary = df_filtered.groupby('errors')['shop_sku'].count().reset_index()
-            summary.columns = ['Tipo de Error', 'Total SKUs']
+            st.subheader("📋 Resumen por Error Individual")
+            # Agrupamos por el error individual y contamos SKUs únicos
+            summary = df_to_show.groupby('errors_list')['shop_sku'].nunique().reset_index()
+            summary.columns = ['Detalle del Error', 'Cantidad SKUs']
             st.dataframe(summary, use_container_width=True, hide_index=True)
 
         with col2:
-            st.subheader("📌 Vista Detallada")
-            st.dataframe(df_filtered[['shop_sku', 'errors']], use_container_width=True, hide_index=True)
+            st.subheader("📌 SKUs Afectados")
+            # Mostramos el SKU y el error individual asociado
+            st.dataframe(df_to_show[['shop_sku', 'errors_list']], use_container_width=True, hide_index=True)
 
-        # --- GENERACIÓN DE EXCEL POR PESTAÑAS ---
-        st.divider()
-        st.subheader("📦 Generar Reporte de Salida")
-        
-        if st.button("Preparar Excel para Descarga"):
+        # --- EXPORTACIÓN ---
+        if st.button("🚀 Generar Excel por Pestañas"):
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Pestaña 1: Resumen General
-                summary.to_excel(writer, index=False, sheet_name='RESUMEN_GENERAL')
+                # Pestaña de resumen
+                summary.to_excel(writer, index=False, sheet_name='RESUMEN_DINAMICO')
                 
-                # Pestañas Dinámicas: Un error por pestaña
-                for error_name in selected_errors:
-                    # Filtrar datos de ese error
-                    specific_df = df_filtered[df_filtered['errors'] == error_name][['shop_sku', 'errors']]
+                # Una pestaña por cada error individual seleccionado
+                errors_to_export = selected_errors if selected_errors else all_unique_errors
+                
+                for i, err in enumerate(errors_to_export):
+                    # Filtrar datos para este error específico
+                    temp_df = df_to_show[df_to_show['errors_list'] == err][['shop_sku', 'errors_list']]
                     
-                    # Limpiar nombre de pestaña (Excel no permite > 31 caracteres o ciertos símbolos)
-                    clean_name = str(error_name)[:30].replace(':', '').replace('/', '').replace('|', '-')
-                    specific_df.to_excel(writer, index=False, sheet_name=clean_name)
-            
-            processed_data = output.getvalue()
-            
+                    # Limpieza de nombre de pestaña (regla de la comilla simple corregida)
+                    clean_name = re.sub(r'[\[\]\:\*\?\/\\]', '', str(err))
+                    clean_name = clean_name.strip("'")[:30]
+                    
+                    if not clean_name: clean_name = f"Error_{i}"
+                    
+                    try:
+                        temp_df.to_excel(writer, index=False, sheet_name=clean_name)
+                    except:
+                        temp_df.to_excel(writer, index=False, sheet_name=f"E_{i}")
+
             st.download_button(
-                label="⬇️ Descargar Excel (Pestañas por Error)",
-                data=processed_data,
-                file_name="correccion_marketplaces.xlsx",
+                label="📥 Descargar Reporte Segmentado",
+                data=output.getvalue(),
+                file_name="errores_segmentados.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            st.success("¡Excel generado con éxito! Cada error tiene su propia pestaña.")
-            
     else:
-        st.error("Error: No se han encontrado las columnas 'errors' o 'shop_sku'. Revisa el formato del CSV.")
+        st.error("Columnas 'errors' o 'shop_sku' no encontradas.")
